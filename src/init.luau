@@ -178,11 +178,11 @@ local DEFAULT_OPTIONS = {
 
 	-- Character layout
 	CharacterPadding = 2,
-	PunctuationPaddingScale = 0,
+	PunctuationPaddingScale = 1.5,
 	PunctuationWidthScale = 0.45,
 	LetterWidthPadding = 5,
 	LetterEdgeBleed = 2,
-	UniformLetterSlots = true,
+	UniformLetterSlots = false,
 	SymbolWidthPadding = 1,
 	SlotAlignment = "Auto", -- "Auto", "Left", "Right"
 	CharacterOrder = nil,
@@ -315,9 +315,30 @@ local function normalizeAssetId(value)
 	return text
 end
 
-local function safeTextSize(text, textSize, font, bounds)
+-- GetTextSize only accepts the legacy Enum.Font approximation of a label's font, which can
+-- diverge from the FontFace actually used to render it (different Weight/Style, or a custom
+-- font asset with no Enum.Font equivalent). Since digits are near tabular-width across weights
+-- but letters vary widely, that divergence is invisible on numbers but shows up as inconsistent
+-- per-letter over/under sizing in letter modes. GetTextBoundsAsync measures the real FontFace,
+-- so prefer it and only fall back to the legacy measurement if it's unavailable.
+local function safeTextSize(text, textSize, font, fontFace, bounds)
 	text = tostring(text or "")
 	textSize = math.max(1, math.floor(textSize or 1))
+
+	if fontFace then
+		local ok, result = pcall(function()
+			local params = Instance.new("GetTextBoundsParams")
+			params.Text = text
+			params.Size = textSize
+			params.Font = fontFace
+			params.Width = (bounds and bounds.X and bounds.X < math.huge) and bounds.X or 1000000
+			return TextService:GetTextBoundsAsync(params)
+		end)
+
+		if ok then
+			return result
+		end
+	end
 
 	local ok, result = pcall(function()
 		return TextService:GetTextSize(text, textSize, font, bounds or Vector2.new(math.huge, math.huge))
@@ -885,7 +906,7 @@ function Spinner:_measureText(text, fontSize)
 		return Vector2.zero
 	end
 
-	return safeTextSize(text, fontSize, self.Source.Font, Vector2.new(math.huge, math.huge))
+	return safeTextSize(text, fontSize, self.Source.Font, self.Source.FontFace, Vector2.new(math.huge, math.huge))
 end
 
 function Spinner:_getGlyphWidthPadding(char, _fontSize)
