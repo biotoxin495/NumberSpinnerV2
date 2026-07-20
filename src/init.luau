@@ -30,8 +30,8 @@
 --   NumberSpinnerV2.ToRoman(value, options)     -- convert a number to roman numerals
 --
 -- Options (all optional, see DEFAULT_OPTIONS for defaults):
---   Animation:       Duration, SlotResizeDuration, SpinMode ("Full"|"SingleStep"),
---                    EasingStyle, EasingDirection, Circular
+--   Animation:       Duration, SlotResizeDuration, SpinMode ("Full"|"SingleStep"|"Reel"),
+--                    ReelStepDuration, ReelMaxFinishSpread, EasingStyle, EasingDirection, Circular
 --   Formatting:      Mode ("Number"|"Roman"|"Text"|"Characters"), Separator, DecimalPlaces,
 --                    ForceDecimals, DecimalSeparator, Abbreviations ({[1e3]="K"}),
 --                    AbbreviationDecimalPlaces, ForceAbbreviationDecimals
@@ -39,7 +39,8 @@
 --   Affixes:         Prefix, Suffix, IconPrefix, IconSuffix, AffixSpacing, IconAffixSpacing
 --   Character layout: CharacterPadding, PunctuationPaddingScale, PunctuationWidthScale,
 --                    LetterWidthPadding, LetterEdgeBleed, UniformLetterSlots,
---                    SymbolWidthPadding, SlotAlignment ("Auto"|"Left"|"Right"), CharacterOrder
+--                    SymbolWidthPadding, SlotAlignment ("Auto"|"Left"|"Right"), CharacterOrder,
+--                    CharacterReel (string or array used by SpinMode = "Reel")
 --   Visual:          ApplyStrokeToChars
 --   Bounce:          BounceOnChange, BounceScale, BounceDuration, BounceReturnDuration,
 --                    BounceEasingStyle, BounceEasingDirection
@@ -147,7 +148,9 @@ local DEFAULT_OPTIONS = {
 	-- Animation
 	Duration = 0.5,
 	SlotResizeDuration = 0.08,
-	SpinMode = "Full", -- "Full", "SingleStep"
+	SpinMode = "Full", -- "Full", "SingleStep", "Reel"
+	ReelStepDuration = nil,
+	ReelMaxFinishSpread = 1,
 	EasingStyle = Enum.EasingStyle.Quad,
 	EasingDirection = Enum.EasingDirection.Out,
 	Circular = false,
@@ -186,6 +189,7 @@ local DEFAULT_OPTIONS = {
 	SymbolWidthPadding = 1,
 	SlotAlignment = "Auto", -- "Auto", "Left", "Right"
 	CharacterOrder = nil,
+	CharacterReel = nil,
 
 	-- Visual styling
 	ApplyStrokeToChars = true,
@@ -885,6 +889,50 @@ function Spinner:_isSingleStepSpinMode()
 	return spinMode == "SingleStep" or spinMode == "Single" or spinMode == "Direct" or spinMode == "Once"
 end
 
+function Spinner:_isReelSpinMode()
+	local spinMode = tostring(self.Options.SpinMode or "Full")
+
+	return spinMode == "Reel" or spinMode == "Cycle" or spinMode == "FullCycle"
+end
+
+function Spinner:_getCharacterReel(targetChar)
+	local configuredReel = self.Options.CharacterReel
+	local reel
+
+	if type(configuredReel) == "string" then
+		reel = splitCharacters(configuredReel)
+	elseif type(configuredReel) == "table" then
+		reel = {}
+
+		for _, char in ipairs(configuredReel) do
+			table.insert(reel, tostring(char))
+		end
+	else
+		reel = DEFAULT_CHARACTER_REEL
+	end
+
+	local targetIsUppercase = string.match(targetChar, "^[A-Z]$") ~= nil
+	local targetIsLowercase = string.match(targetChar, "^[a-z]$") ~= nil
+	local targetIsDigit = isDigitCharacter(targetChar)
+	local matchingReel = {}
+
+	for _, reelChar in ipairs(reel) do
+		local isMatchingCharacterType = (targetIsUppercase and string.match(reelChar, "^[A-Z]$") ~= nil)
+			or (targetIsLowercase and string.match(reelChar, "^[a-z]$") ~= nil)
+			or (targetIsDigit and isDigitCharacter(reelChar))
+
+		if isMatchingCharacterType then
+			table.insert(matchingReel, reelChar)
+
+			if reelChar == targetChar then
+				return matchingReel
+			end
+		end
+	end
+
+	return { targetChar }
+end
+
 function Spinner:_getStrokePadding()
 	if self.Options.ApplyStrokeToChars ~= true then
 		return 0
@@ -1288,6 +1336,7 @@ function Spinner:_createSlot()
 		CurrentPage = nil,
 		SizeTween = nil,
 		ViewportSizeTween = nil,
+		ReelTransitionId = 0,
 	}
 
 	return slot
@@ -1406,8 +1455,91 @@ function Spinner:_setSlotSize(slot, width, renderWidth, height, animate)
 end
 
 function Spinner:_setSlotChar(slot, char, animate)
-	if slot.CurrentChar == char then
+	slot.ReelTransitionId += 1
+	local transitionId = slot.ReelTransitionId
+	local isReelSpinMode = self:_isReelSpinMode()
+
+	if slot.CurrentChar == char and not (isReelSpinMode and animate) then
 		self:_refreshSlotPages(slot)
+		return
+	end
+
+	if isReelSpinMode then
+		local shouldAnimate = animate and self.Options.Duration > 0 and not shouldReduceMotion(self.Options)
+
+		for _, child in ipairs(slot.Viewport:GetChildren()) do
+			if child:IsA("TextLabel") then
+				child:Destroy()
+			end
+		end
+
+		table.clear(slot.Pages)
+
+		if not shouldAnimate then
+			local page = self:_createCharacterPage(slot, char, 1, "Char_Current")
+			slot.PageLayout.Animated = false
+			slot.PageLayout:JumpTo(page)
+			slot.CurrentChar = char
+			slot.CurrentPage = page
+			return
+		end
+
+		local reel = self:_getCharacterReel(char)
+		local reelDuration = asNumber(self.Options.Duration, 0.5)
+		local reelStepDuration = asNumber(self.Options.ReelStepDuration, 0)
+
+		if reelStepDuration > 0 then
+			local stepCount = math.max(1, #reel - 1)
+			local maxFinishSpread = math.max(0, asNumber(self.Options.ReelMaxFinishSpread, 1))
+			reelDuration = math.min(stepCount * reelStepDuration, reelStepDuration + maxFinishSpread)
+		end
+
+		slot.PageLayout.Circular = false
+		slot.PageLayout.EasingStyle = self.Options.EasingStyle
+		slot.PageLayout.EasingDirection = self.Options.EasingDirection
+		slot.PageLayout.TweenTime = reelDuration
+
+		local startChar = reel[1] or slot.CurrentChar or char
+		local currentPage = self:_createCharacterPage(slot, startChar, 1, "Char_ReelStart")
+		local layoutOrder = 1
+
+		for index = 2, #reel - 1 do
+			layoutOrder += 1
+			self:_createCharacterPage(slot, reel[index], layoutOrder, "Char_Reel_" .. tostring(index))
+		end
+
+		layoutOrder += 1
+		local finalPage = self:_createCharacterPage(slot, char, layoutOrder, "Char_ReelFinal")
+
+		slot.PageLayout.Animated = false
+		slot.PageLayout:JumpTo(currentPage)
+		slot.PageLayout.Animated = true
+		slot.PageLayout:JumpTo(finalPage)
+		slot.CurrentChar = char
+		slot.CurrentPage = finalPage
+
+		task.delay(reelDuration + 0.05, function()
+			if
+				self._destroyed
+				or slot.ReelTransitionId ~= transitionId
+				or not finalPage.Parent
+				or not slot.Frame.Parent
+			then
+				return
+			end
+
+			for _, child in ipairs(slot.Viewport:GetChildren()) do
+				if child:IsA("TextLabel") and child ~= finalPage then
+					child:Destroy()
+				end
+			end
+
+			finalPage.Name = "Char_Current"
+			finalPage.LayoutOrder = 1
+			slot.PageLayout.Animated = false
+			slot.PageLayout:JumpTo(finalPage)
+		end)
+
 		return
 	end
 
